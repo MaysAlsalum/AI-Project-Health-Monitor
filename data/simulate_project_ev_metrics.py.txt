@@ -1,0 +1,488 @@
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import LabelEncoder
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+from statsmodels.graphics.tsaplots import plot_acf
+from statsmodels.tsa.stattools import adfuller
+from scipy.stats import shapiro
+
+
+def load_input_file():
+    """
+    Load the input project feature file (CSV).
+
+    Priority:
+    1) Google Colab file upload (if available),
+    2) Desktop file chooser (Tkinter),
+    3) Manual path input from the console.
+    """
+    try:
+        # Google Colab environment
+        from google.colab import files
+        print("Please upload the project feature file (CSV):")
+        uploaded = files.upload()
+        import io
+        file_name = next(iter(uploaded))
+        df = pd.read_csv(io.BytesIO(uploaded[file_name]))
+    except ImportError:
+        # Local Python environment
+        import tkinter as tk
+        from tkinter import filedialog
+        try:
+            root = tk.Tk()
+            root.withdraw()
+            file_path = filedialog.askopenfilename(
+                title="Select project feature CSV file"
+            )
+            if not file_path:
+                file_path = input("Enter the path to the project CSV file: ").strip()
+            df = pd.read_csv(file_path)
+        except Exception:
+            file_path = input("Enter the path to the project CSV file: ").strip()
+            df = pd.read_csv(file_path)
+
+    return df
+
+
+def ordinal_encode(series, mapping_dict=None):
+    """
+    Encode an ordinal or categorical series.
+
+    If mapping_dict is provided, it is used directly.
+    Otherwise, a LabelEncoder is applied.
+    """
+    if mapping_dict:
+        return series.map(mapping_dict).fillna(0).astype(int)
+    else:
+        le = LabelEncoder()
+        return le.fit_transform(series.astype(str))
+
+
+def preprocess_project_features(df_projects, numeric_features, cat_features):
+    """
+    Preprocess the raw project feature table.
+
+    - Convert specified numeric columns to floats, with invalid values coerced to NaN
+      and imputed by the column mean.
+    - Encode categorical / ordinal variables into numeric form.
+    """
+    df_out = df_projects.copy()
+
+    # Robust numeric parsing and mean imputation
+    for col in numeric_features:
+        if col in df_out.columns:
+            df_out[col] = df_out[col].apply(
+                lambda x: pd.to_numeric(str(x).strip(), errors="coerce")
+            )
+            mean_val = df_out[col].mean()
+            df_out[col] = df_out[col].fillna(mean_val)
+
+    # Explicit ordinal mappings for selected columns
+    ordinal_mappings = {
+        "Complexity_Score": {"Low": 1, "Medium": 2, "High": 3},
+        "Team_Experience_Level": {"Junior": 1, "Mid": 2, "Senior": 3, "Lead": 4},
+        "Risk_Level": {"Low": 1, "Medium": 2, "High": 3},
+        "Documentation_Quality": {"Poor": 1, "Acceptable": 2, "Good": 3},
+    }
+
+    # Encode categorical variables
+    for col in cat_features:
+        if col in df_out.columns:
+            df_out[col] = df_out[col].fillna("Unknown").astype(str)
+            if col in ordinal_mappings:
+                df_out[col] = ordinal_encode(df_out[col], ordinal_mappings[col])
+            else:
+                df_out[col] = ordinal_encode(df_out[col])
+
+    return df_out
+
+
+def sample_ar1_noise(n, phi=0.8, sigma=0.03):
+    """
+    Sample a bounded AR(1) process and transform it into
+    multiplicative factors around 1 (for EV deviations).
+    """
+    ar = np.zeros(n)
+    ar[0] = np.random.normal(scale=sigma)
+    for i in range(1, n):
+        ar[i] = phi * ar[i - 1] + np.random.normal(scale=sigma)
+
+    normed = 1 + 0.25 * (ar - np.mean(ar)) / (np.std(ar) + 1e-8)
+    return np.clip(normed, 0.6, 1.4)
+
+
+def logistic_progress(t, L=1.0, k=0.25, x0=None):
+    """
+    Logistic S-curve evaluated on time grid t.
+
+    L: upper bound (typically 1.0),
+    k: steepness parameter,
+    x0: inflection point (defaults to median(t)).
+    """
+    if x0 is None:
+        x0 = np.median(t)
+    return L / (1.0 + np.exp(-k * (t - x0)))
+
+
+def safe_float(v, default):
+    """
+    Safely convert a value to float, falling back to a default if conversion fails.
+    """
+    try:
+        return float(v)
+    except Exception:
+        return float(default)
+
+
+def simulate_project_ev_metrics(row, df_feat):
+    """
+    Simulate monthly PV, EV, AC and derived EVM metrics for a single project.
+
+    The simulation logic follows the configuration described in the article:
+    - Composite schedule-risk and success scores,
+    - Duration perturbation via a normally distributed delay factor,
+    - Logistic S-curve for PV,
+    - AR(1)-based multiplicative noise for EV,
+    - CPI-based cost model for AC.
+    """
+    # Planned duration and budget
+    months = int(safe_float(row.get("Estimated_Timeline_Months"), 12))
+    budget = safe_float(row.get("Project_Budget_USD"), 500000)
+
+    # Extract or impute key features
+    complexity = safe_float(
+        row.get("Complexity_Score"), df_feat["Complexity_Score"].mean()
+    )
+    team_turnover = safe_float(
+        row.get("Team_Turnover_Rate"), df_feat["Team_Turnover_Rate"].mean()
+    )
+    change_freq = safe_float(
+        row.get("Change_Request_Frequency"),
+        df_feat["Change_Request_Frequency"].mean(),
+    )
+    tech_debt = safe_float(
+        row.get("Technical_Debt_Level"), df_feat["Technical_Debt_Level"].mean()
+    )
+    sched_press = safe_float(
+        row.get("Schedule_Pressure"), df_feat["Schedule_Pressure"].mean()
+    )
+    market_vol = safe_float(
+        row.get("Market_Volatility"), df_feat["Market_Volatility"].mean()
+    )
+    historical_risks = safe_float(
+        row.get("Historical_Risk_Incidents"),
+        df_feat["Historical_Risk_Incidents"].mean(),
+    )
+    vendor_rel = safe_float(
+        row.get("Vendor_Reliability_Score"),
+        df_feat["Vendor_Reliability_Score"].mean(),
+    )
+    experience = safe_float(
+        row.get("Team_Experience_Level"), df_feat["Team_Experience_Level"].mean()
+    )
+    methodology = safe_float(
+        row.get("Methodology_Used"), df_feat["Methodology_Used"].mean()
+    )
+    risk_level = safe_float(row.get("Risk_Level"), df_feat["Risk_Level"].mean())
+    prev_success = safe_float(
+        row.get("Previous_Delivery_Success_Rate"),
+        df_feat["Previous_Delivery_Success_Rate"].mean(),
+    )
+    pm_exp = safe_float(
+        row.get("Project_Manager_Experience"),
+        df_feat["Project_Manager_Experience"].mean(),
+    )
+    exec_spons = safe_float(
+        row.get("Executive_Sponsorship"),
+        df_feat["Executive_Sponsorship"].mean(),
+    )
+    risk_mat = safe_float(
+        row.get("Risk_Management_Maturity"),
+        df_feat["Risk_Management_Maturity"].mean(),
+    )
+    change_mat = safe_float(
+        row.get("Change_Control_Maturity"),
+        df_feat["Change_Control_Maturity"].mean(),
+    )
+    stake_eng = safe_float(
+        row.get("Stakeholder_Engagement_Level"),
+        df_feat["Stakeholder_Engagement_Level"].mean(),
+    )
+
+    # Composite schedule-risk and success scores
+    risk_score = (
+        0.3 * complexity / 3.0
+        + 0.25 * team_turnover
+        + 0.2 * change_freq
+        + 0.2 * historical_risks / 5.0
+        + 0.25 * risk_level / 3.0
+        + 0.15 * tech_debt
+        + 0.15 * sched_press
+    )
+
+    success_score = (
+        0.25 * experience / 3.0
+        + 0.2 * methodology / 3.0
+        + 0.3 * prev_success
+        + 0.25 * pm_exp / 3.0
+        + 0.2 * exec_spons / 2.0
+        + 0.2 * stake_eng / 2.0
+        + 0.2 * risk_mat / 2.0
+        + 0.2 * change_mat / 2.0
+    )
+
+    # Delay factor distribution
+    base_delay = 0.1
+    delay_factor_mean = base_delay + 0.08 * risk_score - 0.12 * success_score
+    delay_factor_std = 0.08 + 0.05 * market_vol
+    delay_factor = np.random.normal(delay_factor_mean, delay_factor_std)
+    delay_factor = np.clip(delay_factor, -0.3, 1.5)
+    if np.isnan(delay_factor):
+        delay_factor = 0.0
+
+    # Actual duration (enforcing a minimum project length)
+    actual_months = int(np.ceil(months * (1.0 + delay_factor)))
+    actual_months = max(actual_months, 3)
+    months_array = np.arange(1, actual_months + 1)
+
+    # Logistic S-curve for planned value (PV)
+    s_curve_k = np.clip(
+        0.2
+        + 0.08 * experience
+        + 0.05 * methodology
+        - 0.05 * complexity,
+        0.1,
+        0.6,
+    )
+    pv_progress = logistic_progress(
+        months_array, L=1.0, k=s_curve_k, x0=months / 2.0
+    )
+    pv_cum = budget * pv_progress
+    pv_cum = np.clip(pv_cum, 0.0, budget)
+
+    pv = pv_cum - np.roll(pv_cum, 1)
+    pv[0] = pv_cum[0]
+    pv = pv * (budget / pv.sum())
+
+    # AR(1)-based multiplicative deviations for EV
+    ar_phi = np.clip(
+        0.85
+        - 0.08 * complexity
+        + 0.15 * experience
+        - 0.02 * team_turnover
+        + 0.15 * risk_mat,
+        0.4,
+        0.95,
+    )
+    ar_sigma = np.clip(
+        0.01
+        + 0.05 * complexity
+        + 0.03 * team_turnover
+        + 0.03 * risk_level,
+        0.01,
+        0.1,
+    )
+    ar_noise_raw = sample_ar1_noise(actual_months, phi=ar_phi, sigma=ar_sigma)
+    mean_adjustment = 1.0 - max(delay_factor_mean, 0.0) * 0.33
+    ar_noise = np.clip(ar_noise_raw * mean_adjustment, 0.7, 1.3)
+
+    ev = pv * ar_noise
+    ev = np.clip(ev, 0.0, 1.5 * pv)
+    ev_cum = ev.cumsum()
+    final_ev_adjustment = budget / max(ev_cum[-1], 1e-6)
+    ev = ev * final_ev_adjustment
+
+    # CPI-based cost model
+    cost_risk_score = (
+        0.2 * complexity
+        + 0.25 * team_turnover
+        + 0.15 * tech_debt
+        + 0.2 * historical_risks
+        + 0.15 * risk_level
+    )
+    cost_success_score = (
+        0.2 * experience
+        + 0.15 * methodology
+        + 0.15 * prev_success
+        + 0.2 * vendor_rel
+        + 0.25 * exec_spons
+        + 0.2 * risk_mat
+        + 0.2 * change_mat
+    )
+
+    cpi_mean_base = 0.95
+    cpi_mean_adjusted = (
+        cpi_mean_base
+        - 0.05 * cost_risk_score / 10.0
+        + 0.05 * cost_success_score / 10.0
+    )
+    cpi_mean_adjusted = np.clip(cpi_mean_adjusted, 0.7, 1.2)
+
+    cpi_std = 0.07 + 0.05 * complexity / 3.0 + 0.05 * market_vol
+    cpi_monthly = np.random.normal(cpi_mean_adjusted, cpi_std, actual_months)
+    cpi_monthly = np.clip(cpi_monthly, 0.5, 1.5)
+
+    ac = ev / cpi_monthly
+
+    # SPI and variances at monthly level
+    spi_monthly = np.clip(ev / np.maximum(pv, 1e-6), 0.5, 1.5)
+    cv = ev - ac
+    sv = ev - pv
+
+    # Build time-series DataFrame
+    df_out = pd.DataFrame(
+        {
+            "Project_ID": row["Project_ID"],
+            "Month": months_array,
+            "PV": pv.cumsum(),
+            "EV": ev.cumsum(),
+            "AC": ac.cumsum(),
+            "CPI_Monthly": ev / np.maximum(ac, 1e-5),
+            "SPI_Monthly": spi_monthly,
+            "CV_Monthly": cv,
+            "SV_Monthly": sv,
+            "Estimated_Timeline_Months": months,
+            "Actual_Duration_Months": actual_months,
+            "Planned_Budget": budget,
+            "Actual_Cost": ac.sum(),
+        }
+    )
+    df_out["CPI_Cumulative"] = df_out["EV"] / np.maximum(df_out["AC"], 1e-5)
+    df_out["SPI_Cumulative"] = df_out["EV"] / np.maximum(df_out["PV"], 1e-5)
+
+    return df_out
+
+
+def simulate_all_projects(df_feat):
+    """
+    Simulate EV metrics for all projects in the feature table.
+    """
+    all_data = []
+    print(f"Starting simulation for {len(df_feat)} projects...")
+    for _, row in df_feat.iterrows():
+        all_data.append(simulate_project_ev_metrics(row, df_feat))
+    return pd.concat(all_data, ignore_index=True)
+
+
+if __name__ == "__main__":
+    # Load raw project feature table
+    df_projects = load_input_file()
+
+    # Check for required columns
+    required_cols = [
+        "Project_ID",
+        "Estimated_Timeline_Months",
+        "Project_Budget_USD",
+    ]
+    for c in required_cols:
+        if c not in df_projects.columns:
+            raise ValueError(f"Required column '{c}' is missing in the input data.")
+
+    numeric_features = [
+        "Complexity_Score",
+        "Team_Size",
+        "Stakeholder_Count",
+        "Vendor_Reliability_Score",
+        "Change_Request_Frequency",
+        "External_Dependencies_Count",
+        "Team_Turnover_Rate",
+        "Historical_Risk_Incidents",
+        "Communication_Frequency",
+        "Geographical_Distribution",
+        "Schedule_Pressure",
+        "Budget_Utilization_Rate",
+        "Market_Volatility",
+        "Integration_Complexity",
+        "Resource_Availability",
+        "Organizational_Change_Frequency",
+        "Cross_Functional_Dependencies",
+        "Previous_Delivery_Success_Rate",
+        "Technical_Debt_Level",
+        "Seasonal_Risk_Factor",
+        "Past_Similar_Projects",
+        "Project_Manager_Experience",
+        "Org_Process_Maturity",
+    ]
+
+    cat_features = [
+        "Project_Type",
+        "Methodology_Used",
+        "Team_Experience_Level",
+        "Project_Phase",
+        "Requirement_Stability",
+        "Contract_Type",
+        "Team_Colocation",
+        "Funding_Source",
+        "Executive_Sponsorship",
+        "Technology_Familiarity",
+        "Stakeholder_Engagement_Level",
+        "Priority_Level",
+        "Risk_Management_Maturity",
+        "Change_Control_Maturity",
+        "Documentation_Quality",
+        "Org_Process_Maturity",
+        "Data_Security_Requirements",
+        "Key_Stakeholder_Availability",
+        "Tech_Environment_Stability",
+        "Project_Manager_Experience",
+        "Resource_Contention_Level",
+        "Industry_Volatility",
+        "Risk_Level",
+        "Regulatory_Compliance_Level",
+        "Client_Experience_Level",
+    ]
+
+    # Preprocess features and run the simulation
+    df_feat = preprocess_project_features(df_projects, numeric_features, cat_features)
+    df_time_series = simulate_all_projects(df_feat)
+
+    # Save time-series output
+    df_time_series.to_csv("simulated_project_ev_metrics_final.csv", index=False)
+
+    # Project-level summary
+    summary = (
+        df_time_series.groupby("Project_ID")
+        .agg(
+            Estimated_Timeline_Months=("Estimated_Timeline_Months", "first"),
+            Actual_Duration_Months=("Actual_Duration_Months", "first"),
+            Planned_Budget=("Planned_Budget", "first"),
+            Actual_Cost=("Actual_Cost", "last"),
+        )
+        .reset_index()
+    )
+    summary["Schedule_Delay"] = (
+        summary["Actual_Duration_Months"] - summary["Estimated_Timeline_Months"]
+    )
+    summary["Cost_Overrun"] = summary["Actual_Cost"] - summary["Planned_Budget"]
+    summary.to_csv("project_delay_cost_overrun_summary_final.csv", index=False)
+
+    print("Output files generated:")
+    print("- simulated_project_ev_metrics_final.csv")
+    print("- project_delay_cost_overrun_summary_final.csv")
+
+    # Final CPI/SPI metrics
+    final_metrics = (
+        df_time_series.groupby("Project_ID")
+        .agg(
+            CPI_Final=("CPI_Cumulative", "last"),
+            SPI_Final=("SPI_Cumulative", "last"),
+        )
+        .reset_index()
+    )
+
+    print(f"Mean final CPI: {final_metrics['CPI_Final'].mean():.3f}")
+    print(
+        f"Share of projects with CPI > 1: "
+        f"{(final_metrics['CPI_Final'] > 1).mean() * 100:.2f}%"
+    )
+    print(f"Mean final SPI: {final_metrics['SPI_Final'].mean():.3f}")
+    print(
+        f"Share of projects with SPI > 1: "
+        f"{(summary['Schedule_Delay'] > 0).mean() * 100:.2f}%"
+    )
+    print(
+        f"Share of projects with positive cost overrun: "
+        f"{(summary['Cost_Overrun'] > 0).mean() * 100:.2f}%"
+    )

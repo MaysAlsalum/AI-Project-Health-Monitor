@@ -1,0 +1,52 @@
+# Python virtual environment
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Environment variables / secrets
+.env
+.env.*
+*.env
+*.key
+*.pem
+service-account*.json
+credentials*.json
+
+# Frontend dependencies
+frontend/node_modules/
+node_modules/
+
+# Frontend production build
+frontend/dist/
+dist/
+
+# IDE
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Test/cache
+.pytest_cache/
+.coverage
+
+# Google Cloud local config
+.gcloud/
+
+# Temporary files
+*.tmp
+*.temp
