@@ -108,6 +108,8 @@ Historical Assessment
 - Cloud Firestore integration
 - Artifact Registry image management
 - Google Cloud Run production deployment
+- Interactive project risk distribution visualization
+- Portfolio-level risk dashboard
 
 ---
 
@@ -619,16 +621,19 @@ The React application communicates with the FastAPI backend through REST request
 
 # Dashboard
 
-The dashboard provides an overview of the project portfolio.
+The dashboard provides a centralized overview of the project portfolio and recent AI-powered risk assessments.
 
-The current interface contains indicators for:
+The current dashboard includes:
 
-- Total Projects
-- High Risk Projects
-- Critical Risk Projects
-- AI Analyses
+- Total analyzed projects
+- High-risk project count
+- Critical-risk project count
+- Average prediction confidence
+- Risk Distribution visualization across Low, Medium, High, and Critical risk levels
+- Recent project analyses with risk level and confidence score
+- AI Engine Status for Vertex AI, Gemini 2.5 Flash, and the Cloud Run backend
 
-It also contains a **Recent Project Analysis** section showing recent assessments and their associated risk classifications.
+The dashboard retrieves persisted analysis data from Cloud Firestore, allowing project risk information to remain available across sessions.
 
 ---
 
